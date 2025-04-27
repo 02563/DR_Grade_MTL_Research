@@ -21,7 +21,7 @@ class Config:
 
         # 训练参数
         self.TRAIN_PARAMS = {
-            "BATCH_SIZE": 8,  # 批量大小
+            "BATCH_SIZE": 4,  # 批量大小
             "EPOCHS": 40,
             "LR": 1e-4,
             "VAL_SPLIT": 0.2,
@@ -38,6 +38,9 @@ class Config:
                 'type': 'classification',
                 'num_classes': 5,
                 'loss_weight': 1.0
+            },
+            'recon': {
+                'type': 'regression'
             }
         }
 

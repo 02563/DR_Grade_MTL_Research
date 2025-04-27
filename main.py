@@ -1,13 +1,7 @@
-'''
-Author: AlAuMid 2606414786@xiaomi.com
-Date: 2025-04-08 00:55:44
-LastEditors: AlAuMid 2606414786@xiaomi.com
-LastEditTime: 2025-04-11 19:03:34
-FilePath: \DR_Grade_MTL_Research\main.py
-Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
-'''
 import sys
 import os
+from tensorflow.keras import mixed_precision
+mixed_precision.set_global_policy('mixed_float16')
 
 # 关键：添加项目根目录到 Python 路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
