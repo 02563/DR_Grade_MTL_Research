@@ -1,12 +1,17 @@
 import os
 import tensorflow as tf
+from tensorflow.keras.mixed_precision import experimental as mixed_precision
+
+# 适配 TensorFlow 2.8 的混合精度设置
+policy = mixed_precision.Policy('mixed_float16')
+mixed_precision.set_policy(policy)
+
 from tensorflow.keras import callbacks
 import tensorflow_addons as tfa
-from tensorflow.keras.optimizers.schedules import ExponentialDecay
+from tensorflow.keras.optimizers.schedules import CosineDecay
 from .model import build_model, UnfreezeCallback
 from .utils import get_dataset
 from .config import config
-
 
 class WarmUp(tf.keras.optimizers.schedules.LearningRateSchedule):
     """WarmUp + 衰减联合学习率策略"""
@@ -42,7 +47,6 @@ class WarmUp(tf.keras.optimizers.schedules.LearningRateSchedule):
             decay_fn=decay_fn
         )
 
-
 def train():
     """训练模型"""
     # GPU配置
@@ -63,13 +67,12 @@ def train():
 
     print(f"[调试] 训练步数: {steps_per_epoch}, 验证步数: {validation_steps}")
 
-    # 学习率调度
+    # 学习率调度器
     total_steps = config.TRAIN_PARAMS["EPOCHS"] * steps_per_epoch
     warmup_steps = config.TRAIN_PARAMS["WARMUP_EPOCHS"] * steps_per_epoch
-    decay_fn = ExponentialDecay(
+    decay_fn = CosineDecay(
         initial_learning_rate=config.TRAIN_PARAMS["LR"],
-        decay_steps=total_steps - warmup_steps,
-        decay_rate=0.96
+        decay_steps=total_steps - warmup_steps
     )
     lr_schedule = WarmUp(
         initial_lr=config.TRAIN_PARAMS["LR"],
@@ -114,7 +117,7 @@ def train():
             mode='max'
         ),
         callbacks.TensorBoard(config.LOG_DIR),
-        callbacks.EarlyStopping(monitor='val_grade_auc', patience=40, restore_best_weights=True),
+        callbacks.EarlyStopping(monitor='val_grade_auc', patience=10, restore_best_weights=True),
         UnfreezeCallback()
     ]
 
@@ -126,7 +129,6 @@ def train():
         callbacks=callbacks_list
     )
     return history
-
 
 if __name__ == "__main__":
     train()
