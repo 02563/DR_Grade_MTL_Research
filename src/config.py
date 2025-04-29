@@ -1,58 +1,42 @@
 import os
 
 class Config:
-    def __init__(self):
-        # 数据集路径
-        self.DATA_ROOT = r"E:\DR_Grade_MTL_Research\data"
-        self.RAW_DIR = os.path.join(self.DATA_ROOT, "raw/aptos2019-blindness-detection")
-        self.PROCESSED_DIR = os.path.join(self.DATA_ROOT, "processed")  # 确保此目录生成
+    """全局配置"""
+    # 项目根路径
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-        #self.DATA_ROOT = "E:/DR_Grade_MTL_Research/data"
-        #self.RAW_DIR = os.path.join(self.DATA_ROOT, "raw/aptos2019-blindness-detection")
-        #self.PROCESSED_DIR = os.path.join(self.DATA_ROOT, "processed")
-        self.CSV_PATH = os.path.join(self.RAW_DIR, "train.csv")
-        
-        # 图像参数
-        self.IMG_PARAMS = {
-            "IMG_SIZE": 384,
-            "CROP_SIZE": 224,
-            "INPUT_SIZE": 224  
-        }
+    # 数据路径
+    RAW_DIR = os.path.join(BASE_DIR, "data", "raw")
+    PROCESSED_DIR = os.path.join(BASE_DIR, "data", "processed")
 
-        # 训练参数
-        self.TRAIN_PARAMS = {
-            "BATCH_SIZE": 4,  # 批量大小
-            "EPOCHS": 40,
-            "LR": 1e-4,
-            "VAL_SPLIT": 0.2,
-            "USE_FOCAL_LOSS": True,
-            "GRADIENT_CLIP": 1.0,
-            "WARMUP_EPOCHS": 5,
-            "NUM_TRAIN_SAMPLES": 2929,  # 初始化后自动填充
-            "NUM_VAL_SAMPLES": 733
-        }
+    # CSV文件路径
+    CSV_PATH = os.path.join(PROCESSED_DIR, "combined_train.csv")
 
-        # 多任务参数
-        self.TASKS = {
-            'grade': {
-                'type': 'classification',
-                'num_classes': 5,
-                'loss_weight': 1.0
-            },
-            'recon': {
-                'type': 'regression'
-            }
-        }
+    # 图片处理参数
+    IMG_PARAMS = {
+        "INPUT_SIZE": 224,
+        "CROP_SIZE": 256
+    }
 
-        # 路径配置
-        self.CHECKPOINT_PATH = "./checkpoints/best_model.h5"
-        self.LOG_DIR = "./logs"
-        self._ensure_directories()
+    # 训练参数
+    TRAIN_PARAMS = {
+        "EPOCHS": 40,
+        "BATCH_SIZE": 32,
+        "LR": 1e-3,
+        "WARMUP_EPOCHS": 1,
+        "VAL_SPLIT": 0.2,
+        "NUM_TRAIN_SAMPLES": 9656,  # 后续在create_tfrecords动态更新
+        "NUM_VAL_SAMPLES": 2414,
+        "UNFREEZE_EPOCH": 3,
+        "GRADIENT_CLIP": 5.0
+    }
 
-    def _ensure_directories(self):
-        """创建必要目录"""
-        os.makedirs(self.PROCESSED_DIR, exist_ok=True)
-        os.makedirs(os.path.dirname(self.CHECKPOINT_PATH), exist_ok=True)
-        os.makedirs(self.LOG_DIR, exist_ok=True)
+    MODEL_PARAMS = {
+        "NUM_CLASSES": 5   # APTOS竞赛是5类
+    }
+
+    # 其他路径
+    CHECKPOINT_PATH = os.path.join(BASE_DIR, "checkpoints", "best_model.h5")
+    LOG_DIR = os.path.join(BASE_DIR, "logs")
 
 config = Config()

@@ -1,45 +1,45 @@
-import sys
-import os
-from tensorflow.keras import mixed_precision
-mixed_precision.set_global_policy('mixed_float16')
-
-# 关键：添加项目根目录到 Python 路径
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
 import argparse
-from src.train import train
-from src.data_prepare import create_tfrecords  # Assuming it exists in this module
+import os
+import tensorflow as tf
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="糖尿病性视网膜病变多任务学习")
-    parser.add_argument(
-        "--prepare_data", 
-        action="store_true",
-        help="生成TFRecords数据集"
-    )
-    parser.add_argument(
-        "--train",
-        action="store_true",
-        help="启动模型训练"
-    )
-    return parser.parse_args()
+from src.data_prepare import create_tfrecords
+from src.train import train
+from src.config import config
+
+def main(args):
+    if args.prepare:
+        print("正在生成TFRecords数据集...")
+        os.makedirs(config.PROCESSED_DIR, exist_ok=True)
+        create_tfrecords()
+
+    if args.train:
+        print("正在启动模型训练...")
+        train()
+
+    if args.test_gpu:
+        print("正在测试GPU环境...")
+        print(f"TensorFlow版本: {tf.__version__}")
+        gpus = tf.config.list_physical_devices('GPU')
+        print(f"是否有可用GPU: {gpus}")
+        if not gpus:
+            print("未检测到GPU，使用CPU运行")
+        else:
+            # 简单矩阵乘法测试
+            import time
+            a = tf.random.normal([3000, 3000])
+            b = tf.random.normal([3000, 3000])
+            start = time.time()
+            c = tf.matmul(a, b)
+            tf.keras.backend.eval(c)
+            duration = time.time() - start
+            print(f"矩阵乘法完成，用时 {duration:.2f} 秒")
+        print("测试完成。")
 
 if __name__ == "__main__":
-    args = parse_args()
-    
-    if args.prepare_data:
-        print("正在生成TFRecords数据集...")
-        try:
-            create_tfrecords()
-        except Exception as e:
-            print(f"数据预处理失败：{e}")
-    elif args.train:
-        print("正在启动模型训练...")
-        try:
-            train()
-        except Exception as e:
-            print(f"模型训练失败：{e}")
-    else:
-        print("请指定运行模式，例如：")
-        print("  python main.py --prepare_data  # 仅预处理数据")
-        print("  python main.py --train         # 仅训练模型")
+    parser = argparse.ArgumentParser(description="糖尿病性视网膜病变多任务学习项目")
+    parser.add_argument("--prepare", action="store_true", help="生成TFRecords文件")
+    parser.add_argument("--train", action="store_true", help="训练模型")
+    parser.add_argument("--test_gpu", action="store_true", help="测试GPU环境")
+    args = parser.parse_args()
+
+    main(args)

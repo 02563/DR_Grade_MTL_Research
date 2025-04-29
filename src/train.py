@@ -1,20 +1,15 @@
+# src/train.py （完整版，包含改良版解冻回调）
+
 import os
 import tensorflow as tf
-from tensorflow.keras.mixed_precision import experimental as mixed_precision
-
-# 适配 TensorFlow 2.8 的混合精度设置
-policy = mixed_precision.Policy('mixed_float16')
-mixed_precision.set_policy(policy)
-
 from tensorflow.keras import callbacks
 import tensorflow_addons as tfa
-from tensorflow.keras.optimizers.schedules import CosineDecay
-from .model import build_model, UnfreezeCallback
+from tensorflow.keras.optimizers.schedules import ExponentialDecay
+from .model import build_model
 from .utils import get_dataset
 from .config import config
 
 class WarmUp(tf.keras.optimizers.schedules.LearningRateSchedule):
-    """WarmUp + 衰减联合学习率策略"""
     def __init__(self, initial_lr, warmup_steps, decay_fn):
         super().__init__()
         self.initial_lr = initial_lr
@@ -25,11 +20,7 @@ class WarmUp(tf.keras.optimizers.schedules.LearningRateSchedule):
         step = tf.cast(step, tf.float32)
         warmup_lr = self.initial_lr * (step / self.warmup_steps)
         decay_lr = self.decay_fn(step - self.warmup_steps)
-        return tf.cond(
-            step < self.warmup_steps,
-            lambda: warmup_lr,
-            lambda: decay_lr
-        )
+        return tf.cond(step < self.warmup_steps, lambda: warmup_lr, lambda: decay_lr)
 
     def get_config(self):
         return {
@@ -47,9 +38,20 @@ class WarmUp(tf.keras.optimizers.schedules.LearningRateSchedule):
             decay_fn=decay_fn
         )
 
+class CustomUnfreezeCallback(tf.keras.callbacks.Callback):
+    """训练到一定轮次后，解冻特征提取层"""
+    def __init__(self, unfreeze_epoch=10):
+        super().__init__()
+        self.unfreeze_epoch = unfreeze_epoch
+
+    def on_epoch_begin(self, epoch, logs=None):
+        if epoch == self.unfreeze_epoch:
+            print(f"[回调] 第{self.unfreeze_epoch}轮，解冻 base_model 权重！")
+            base_model = self.model.get_layer('efficientnetb0')
+            base_model.trainable = True
+
 def train():
-    """训练模型"""
-    # GPU配置
+    print("正在启动模型训练...")
     physical_devices = tf.config.list_physical_devices('GPU')
     if physical_devices:
         try:
@@ -58,22 +60,23 @@ def train():
         except RuntimeError as e:
             print("配置失败:", e)
 
-    # 准备数据
     train_dataset = get_dataset('train', config.TRAIN_PARAMS["BATCH_SIZE"])
     val_dataset = get_dataset('val', config.TRAIN_PARAMS["BATCH_SIZE"])
 
     steps_per_epoch = config.TRAIN_PARAMS["NUM_TRAIN_SAMPLES"] // config.TRAIN_PARAMS["BATCH_SIZE"]
     validation_steps = config.TRAIN_PARAMS["NUM_VAL_SAMPLES"] // config.TRAIN_PARAMS["BATCH_SIZE"]
 
-    print(f"[调试] 训练步数: {steps_per_epoch}, 验证步数: {validation_steps}")
+    print(f"[调试] 训练步数: {steps_per_epoch}")
 
-    # 学习率调度器
     total_steps = config.TRAIN_PARAMS["EPOCHS"] * steps_per_epoch
     warmup_steps = config.TRAIN_PARAMS["WARMUP_EPOCHS"] * steps_per_epoch
-    decay_fn = CosineDecay(
+
+    decay_fn = ExponentialDecay(
         initial_learning_rate=config.TRAIN_PARAMS["LR"],
-        decay_steps=total_steps - warmup_steps
+        decay_steps=total_steps - warmup_steps,
+        decay_rate=0.96
     )
+
     lr_schedule = WarmUp(
         initial_lr=config.TRAIN_PARAMS["LR"],
         warmup_steps=warmup_steps,
@@ -82,13 +85,11 @@ def train():
 
     optimizer = tf.keras.optimizers.Adam(
         learning_rate=lr_schedule,
-        clipnorm=config.TRAIN_PARAMS["GRADIENT_CLIP"]
+        clipnorm=config.TRAIN_PARAMS.get("GRADIENT_CLIP", 1.0)
     )
 
-    # 构建模型
     model = build_model()
 
-    # 编译模型
     model.compile(
         optimizer=optimizer,
         loss={
@@ -108,24 +109,35 @@ def train():
         }
     )
 
-    # 回调函数
     callbacks_list = [
         callbacks.ModelCheckpoint(
             config.CHECKPOINT_PATH,
             monitor='val_grade_auc',
             save_best_only=True,
-            mode='max'
+            mode='max',
+            verbose=1
         ),
-        callbacks.TensorBoard(config.LOG_DIR),
-        callbacks.EarlyStopping(monitor='val_grade_auc', patience=10, restore_best_weights=True),
-        UnfreezeCallback()
+        callbacks.TensorBoard(
+            log_dir=config.LOG_DIR,
+            update_freq='epoch'
+        ),
+        callbacks.EarlyStopping(
+            monitor='val_grade_auc',
+            patience=config.TRAIN_PARAMS.get("EARLY_STOPPING_PATIENCE", 10),
+            restore_best_weights=True,
+            verbose=1
+        ),
+        CustomUnfreezeCallback(
+            unfreeze_epoch=config.TRAIN_PARAMS.get("UNFREEZE_EPOCH", 10)
+        )
     ]
 
-    # 开始训练
     history = model.fit(
         train_dataset,
         epochs=config.TRAIN_PARAMS["EPOCHS"],
+        steps_per_epoch=steps_per_epoch,
         validation_data=val_dataset,
+        validation_steps=validation_steps,
         callbacks=callbacks_list
     )
     return history
