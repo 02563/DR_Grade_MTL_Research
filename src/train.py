@@ -1,4 +1,4 @@
-# src/train.py （完整版，包含改良版解冻回调）
+# src/train.py
 
 import os
 import tensorflow as tf
@@ -8,6 +8,7 @@ from tensorflow.keras.optimizers.schedules import ExponentialDecay
 from .model import build_model
 from .utils import get_dataset
 from .config import config
+
 
 class WarmUp(tf.keras.optimizers.schedules.LearningRateSchedule):
     def __init__(self, initial_lr, warmup_steps, decay_fn):
@@ -38,17 +39,33 @@ class WarmUp(tf.keras.optimizers.schedules.LearningRateSchedule):
             decay_fn=decay_fn
         )
 
+
 class CustomUnfreezeCallback(tf.keras.callbacks.Callback):
-    """训练到一定轮次后，解冻特征提取层"""
-    def __init__(self, unfreeze_epoch=10):
+    def __init__(self, unfreeze_epoch=10, optimizer=None, loss=None, loss_weights=None, metrics=None):
         super().__init__()
         self.unfreeze_epoch = unfreeze_epoch
+        self.optimizer = optimizer
+        self.loss = loss
+        self.loss_weights = loss_weights
+        self.metrics = metrics
 
     def on_epoch_begin(self, epoch, logs=None):
         if epoch == self.unfreeze_epoch:
-            print(f"[回调] 第{self.unfreeze_epoch}轮，解冻 base_model 权重！")
-            base_model = self.model.get_layer('efficientnetb0')
+            print(f"[回调] 第{self.unfreeze_epoch}轮，解冻 base_model 权重并重新编译模型")
+            base_model = self.model.get_layer('resnet50')
             base_model.trainable = True
+
+            # 重新编译模型
+            self.model.compile(
+                optimizer=self.optimizer,
+                loss=self.loss,
+                loss_weights=self.loss_weights,
+                metrics=self.metrics
+            )
+
+            # 重要：强制重新构建训练函数
+            self.model.make_train_function()  # 解决 NoneType 错误
+
 
 def train():
     print("正在启动模型训练...")
@@ -90,23 +107,27 @@ def train():
 
     model = build_model()
 
+    losses = {
+        "grade": "categorical_crossentropy",
+        "recon": "mse"
+    }
+    loss_weights = {
+        "grade": 1.0,
+        "recon": 0.5
+    }
+    metrics = {
+        "grade": [
+            tf.keras.metrics.AUC(name='auc'),
+            tf.keras.metrics.CategoricalAccuracy(name='acc')
+        ],
+        "recon": []
+    }
+
     model.compile(
         optimizer=optimizer,
-        loss={
-            "grade": "categorical_crossentropy",
-            "recon": "mse"
-        },
-        loss_weights={
-            "grade": 1.0,
-            "recon": 0.5
-        },
-        metrics={
-            "grade": [
-                tf.keras.metrics.AUC(name='auc'),
-                tf.keras.metrics.CategoricalAccuracy(name='acc')
-            ],
-            "recon": []
-        }
+        loss=losses,
+        loss_weights=loss_weights,
+        metrics=metrics
     )
 
     callbacks_list = [
@@ -128,7 +149,11 @@ def train():
             verbose=1
         ),
         CustomUnfreezeCallback(
-            unfreeze_epoch=config.TRAIN_PARAMS.get("UNFREEZE_EPOCH", 10)
+            unfreeze_epoch=config.TRAIN_PARAMS.get("UNFREEZE_EPOCH", 10),
+            optimizer=optimizer,
+            loss=losses,
+            loss_weights=loss_weights,
+            metrics=metrics
         )
     ]
 
@@ -141,6 +166,7 @@ def train():
         callbacks=callbacks_list
     )
     return history
+
 
 if __name__ == "__main__":
     train()

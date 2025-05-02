@@ -10,7 +10,7 @@ class Config:
     PROCESSED_DIR = os.path.join(BASE_DIR, "data", "processed")
 
     # CSV文件路径
-    CSV_PATH = os.path.join(PROCESSED_DIR, "combined_train.csv")
+    CSV_PATH = os.path.join(RAW_DIR, "trainLabels.csv")
 
     # 图片处理参数
     IMG_PARAMS = {
@@ -20,13 +20,13 @@ class Config:
 
     # 训练参数
     TRAIN_PARAMS = {
-        "EPOCHS": 40,
+        "EPOCHS": 20,
         "BATCH_SIZE": 32,
         "LR": 1e-3,
         "WARMUP_EPOCHS": 1,
         "VAL_SPLIT": 0.2,
-        "NUM_TRAIN_SAMPLES": 9656,  # 后续在create_tfrecords动态更新
-        "NUM_VAL_SAMPLES": 2414,
+        "NUM_TRAIN_SAMPLES": 6726,  # 后续在create_tfrecords动态更新
+        "NUM_VAL_SAMPLES": 1682,
         "UNFREEZE_EPOCH": 3,
         "GRADIENT_CLIP": 5.0
     }
