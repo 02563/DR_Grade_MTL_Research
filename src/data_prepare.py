@@ -1,11 +1,26 @@
 import os
 import cv2
+import json
 import pandas as pd
 import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
+from collections import Counter
 from .config import config
+
+def compute_class_weights(df):
+    """根据训练集标签分布计算 class_weight"""
+    counts = dict(Counter(df['diagnosis']))
+    total = sum(counts.values())
+    num_classes = config.MODEL_PARAMS['NUM_CLASSES']
+
+    class_weights = {
+        i: total / (num_classes * counts.get(i, 1))
+        for i in range(num_classes)
+    }
+    print("[调试] 自动计算的 class_weight：", class_weights)
+    return class_weights
 
 def preprocess_image(image_path, augment=True):
     """EyePACS 图像预处理"""
@@ -49,13 +64,13 @@ def create_tfrecords():
     df['image_path'] = df['id_code'].apply(
         lambda x: os.path.join(config.RAW_DIR, "train", f"{x}.jpeg"))
     
+    print("有效图像数量:", len(df))
+
     # 只保留确实存在的图像文件，训练子集
     df = df[df['image_path'].apply(os.path.exists)].reset_index(drop=True)
-
-    missing_files = [p for p in df['image_path'] if not os.path.exists(p)]
-    if missing_files:
-        raise FileNotFoundError(f"缺失 {len(missing_files)} 个图像文件")
-
+    
+    print("有效图像数量:", len(df))
+    
     train_df, val_df = train_test_split(
         df, test_size=config.TRAIN_PARAMS["VAL_SPLIT"],
         stratify=df['diagnosis'], random_state=42
@@ -78,9 +93,31 @@ def create_tfrecords():
                     print(f"[跳过] {row['id_code']}: {str(e)}")
         return valid_count
 
-    config.TRAIN_PARAMS["NUM_TRAIN_SAMPLES"] = _write_dataset(train_df, "train")
-    config.TRAIN_PARAMS["NUM_VAL_SAMPLES"] = _write_dataset(val_df, "val")
+    # 分别写入训练集和验证集
+    num_train = _write_dataset(train_df, "train")
+    num_val = _write_dataset(val_df, "val")
 
-    print(f"[调试] 训练集样本数：{config.TRAIN_PARAMS['NUM_TRAIN_SAMPLES']}")
-    print(f"[调试] 验证集样本数：{config.TRAIN_PARAMS['NUM_VAL_SAMPLES']}")
+    # 更新 config（注意此时才是实际生成的样本数量）
+    config.TRAIN_PARAMS["NUM_TRAIN_SAMPLES"] = num_train
+    config.TRAIN_PARAMS["NUM_VAL_SAMPLES"] = num_val
+
+    # 保存到 train_info.json
+    training_info = {
+        "NUM_TRAIN_SAMPLES": num_train,
+        "NUM_VAL_SAMPLES": num_val
+    }
+    with open(os.path.join(config.PROCESSED_DIR, 'train_info.json'), 'w') as f:
+        json.dump(training_info, f)
+
+    # 计算 class_weight
+    class_weights = compute_class_weights(train_df)
+
+    print(f"[调试] 训练集样本数：{num_train}")
+    print(f"[调试] 验证集样本数：{num_val}")
     print(f"[调试] TFRecords 路径：{config.PROCESSED_DIR}/train.tfrecords 和 val.tfrecords")
+
+    # 保存 class_weights 到 JSON
+    with open(os.path.join(config.PROCESSED_DIR, 'class_weights.json'), 'w') as f:
+        json.dump(class_weights, f)
+
+    return class_weights

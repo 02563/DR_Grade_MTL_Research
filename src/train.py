@@ -1,15 +1,21 @@
-# src/train.py
-
 import os
 import tensorflow as tf
+import json
 from tensorflow.keras import callbacks
-import tensorflow_addons as tfa
-from tensorflow.keras.optimizers.schedules import ExponentialDecay
+from tensorflow.keras.optimizers.schedules import CosineDecay
+from tensorflow_addons.optimizers import AdamW
+from tensorflow.keras.losses import CategoricalCrossentropy
+from tensorflow.keras import mixed_precision
+from tensorflow.keras.utils import register_keras_serializable
+from tensorflow.keras.mixed_precision import LossScaleOptimizer
 from .model import build_model
 from .utils import get_dataset
 from .config import config
 
+# Enable mixed precision using new API
+mixed_precision.set_global_policy('mixed_float16')
 
+@register_keras_serializable()
 class WarmUp(tf.keras.optimizers.schedules.LearningRateSchedule):
     def __init__(self, initial_lr, warmup_steps, decay_fn):
         super().__init__()
@@ -32,42 +38,57 @@ class WarmUp(tf.keras.optimizers.schedules.LearningRateSchedule):
 
     @classmethod
     def from_config(cls, config):
-        decay_fn = tf.keras.optimizers.schedules.deserialize(config["decay_fn"])
-        return cls(
-            initial_lr=config["initial_lr"],
-            warmup_steps=config["warmup_steps"],
-            decay_fn=decay_fn
-        )
-
+        config["decay_fn"] = tf.keras.optimizers.schedules.deserialize(config["decay_fn"])
+        return cls(**config)
 
 class CustomUnfreezeCallback(tf.keras.callbacks.Callback):
-    def __init__(self, unfreeze_epoch=10, optimizer=None, loss=None, loss_weights=None, metrics=None):
+    def __init__(self, unfreeze_epoch=5, loss=None, loss_weights=None, metrics=None):
         super().__init__()
         self.unfreeze_epoch = unfreeze_epoch
-        self.optimizer = optimizer
         self.loss = loss
         self.loss_weights = loss_weights
         self.metrics = metrics
 
     def on_epoch_begin(self, epoch, logs=None):
         if epoch == self.unfreeze_epoch:
-            print(f"[回调] 第{self.unfreeze_epoch}轮，解冻 base_model 权重并重新编译模型")
-            base_model = self.model.get_layer('resnet50')
-            base_model.trainable = True
+            print(f"[回调] 第{self.unfreeze_epoch}轮，解冻卷积与BN层并重新编译模型")
 
-            # 重新编译模型
+            unfrozen = 0
+            for layer in self.model.layers:
+                if isinstance(layer, tf.keras.layers.Conv2D) or isinstance(layer, tf.keras.layers.BatchNormalization):
+                    layer.trainable = True
+                    unfrozen += 1
+            print(f"[回调] 解冻 {unfrozen} 个 Conv2D/BN 层")
+
+            new_optimizer = AdamW(
+                learning_rate=self.model.optimizer.learning_rate,
+                weight_decay=config.MODEL_PARAMS["WEIGHT_DECAY"],
+                clipnorm=config.TRAIN_PARAMS["GRADIENT_CLIP"]
+            )
+            new_optimizer = LossScaleOptimizer(new_optimizer)
+
             self.model.compile(
-                optimizer=self.optimizer,
+                optimizer=new_optimizer,
                 loss=self.loss,
                 loss_weights=self.loss_weights,
                 metrics=self.metrics
             )
-
-            # 重要：强制重新构建训练函数
-            self.model.make_train_function()  # 解决 NoneType 错误
-
+            self.model.make_train_function()
 
 def train():
+    with open(os.path.join(config.PROCESSED_DIR, "class_weights.json"), "r") as f:
+        class_weights = json.load(f)
+
+    def compute_sample_weights(labels, class_weights):
+        label_indices = tf.argmax(labels, axis=1)
+        weights = tf.gather([class_weights[str(i)] for i in range(len(class_weights))], label_indices)
+        return tf.cast(weights, tf.float32)
+
+    def add_sample_weights(x, y, sw=None):
+        grade_labels = y["grade"]
+        weights = compute_sample_weights(grade_labels, class_weights)
+        return x, y, {"grade": weights, "recon": None}
+
     print("正在启动模型训练...")
     physical_devices = tf.config.list_physical_devices('GPU')
     if physical_devices:
@@ -78,20 +99,19 @@ def train():
             print("配置失败:", e)
 
     train_dataset = get_dataset('train', config.TRAIN_PARAMS["BATCH_SIZE"])
+    train_dataset = train_dataset.map(add_sample_weights, num_parallel_calls=tf.data.AUTOTUNE)
     val_dataset = get_dataset('val', config.TRAIN_PARAMS["BATCH_SIZE"])
 
     steps_per_epoch = config.TRAIN_PARAMS["NUM_TRAIN_SAMPLES"] // config.TRAIN_PARAMS["BATCH_SIZE"]
     validation_steps = config.TRAIN_PARAMS["NUM_VAL_SAMPLES"] // config.TRAIN_PARAMS["BATCH_SIZE"]
 
-    print(f"[调试] 训练步数: {steps_per_epoch}")
-
     total_steps = config.TRAIN_PARAMS["EPOCHS"] * steps_per_epoch
     warmup_steps = config.TRAIN_PARAMS["WARMUP_EPOCHS"] * steps_per_epoch
 
-    decay_fn = ExponentialDecay(
+    decay_fn = CosineDecay(
         initial_learning_rate=config.TRAIN_PARAMS["LR"],
         decay_steps=total_steps - warmup_steps,
-        decay_rate=0.96
+        alpha=1e-5
     )
 
     lr_schedule = WarmUp(
@@ -100,25 +120,32 @@ def train():
         decay_fn=decay_fn
     )
 
-    optimizer = tf.keras.optimizers.Adam(
+    optimizer = AdamW(
         learning_rate=lr_schedule,
-        clipnorm=config.TRAIN_PARAMS.get("GRADIENT_CLIP", 1.0)
+        weight_decay=config.MODEL_PARAMS["WEIGHT_DECAY"],
+        clipnorm=config.TRAIN_PARAMS["GRADIENT_CLIP"]
+    )
+    optimizer = LossScaleOptimizer(optimizer)
+
+    model = build_model(
+        input_shape=(224, 224, 3),
+        num_classes=config.MODEL_PARAMS["NUM_CLASSES"],
+        dropout_rate=config.MODEL_PARAMS["DROPOUT"],
+        weight_decay=config.MODEL_PARAMS["WEIGHT_DECAY"]
     )
 
-    model = build_model()
-
     losses = {
-        "grade": "categorical_crossentropy",
+        "grade": CategoricalCrossentropy(label_smoothing=0.1),
         "recon": "mse"
     }
     loss_weights = {
         "grade": 1.0,
-        "recon": 0.5
+        "recon": 0.005
     }
     metrics = {
         "grade": [
-            tf.keras.metrics.AUC(name='auc'),
-            tf.keras.metrics.CategoricalAccuracy(name='acc')
+            tf.keras.metrics.AUC(name='grade_auc'),
+            tf.keras.metrics.CategoricalAccuracy(name='grade_acc')
         ],
         "recon": []
     }
@@ -132,25 +159,26 @@ def train():
 
     callbacks_list = [
         callbacks.ModelCheckpoint(
-            config.CHECKPOINT_PATH,
-            monitor='val_grade_auc',
+            filepath=config.CHECKPOINT_PATH,
+            monitor='val_grade_grade_auc',
             save_best_only=True,
             mode='max',
-            verbose=1
+            verbose=1,
+            save_format='tf'
         ),
         callbacks.TensorBoard(
-            log_dir=config.LOG_DIR,
+            log_path = './tf_dir'
+            log_dir=log_path,
             update_freq='epoch'
         ),
         callbacks.EarlyStopping(
-            monitor='val_grade_auc',
-            patience=config.TRAIN_PARAMS.get("EARLY_STOPPING_PATIENCE", 10),
+            monitor='val_grade_grade_auc',
+            patience=10,
             restore_best_weights=True,
             verbose=1
         ),
         CustomUnfreezeCallback(
-            unfreeze_epoch=config.TRAIN_PARAMS.get("UNFREEZE_EPOCH", 10),
-            optimizer=optimizer,
+            unfreeze_epoch=config.TRAIN_PARAMS["UNFREEZE_EPOCH"],
             loss=losses,
             loss_weights=loss_weights,
             metrics=metrics
@@ -166,7 +194,3 @@ def train():
         callbacks=callbacks_list
     )
     return history
-
-
-if __name__ == "__main__":
-    train()

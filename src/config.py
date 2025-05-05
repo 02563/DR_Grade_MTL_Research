@@ -1,42 +1,39 @@
+### config.py
 import os
 
 class Config:
-    """全局配置"""
-    # 项目根路径
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    BASE_DIR2 = '/openbayes/input/input0'
 
-    # 数据路径
-    RAW_DIR = os.path.join(BASE_DIR, "data", "raw")
+    RAW_DIR = BASE_DIR2
     PROCESSED_DIR = os.path.join(BASE_DIR, "data", "processed")
 
-    # CSV文件路径
-    CSV_PATH = os.path.join(RAW_DIR, "trainLabels.csv")
+    CSV_PATH = os.path.join(BASE_DIR2, "trainLabels.csv")
 
-    # 图片处理参数
     IMG_PARAMS = {
         "INPUT_SIZE": 224,
         "CROP_SIZE": 256
     }
 
-    # 训练参数
     TRAIN_PARAMS = {
-        "EPOCHS": 20,
-        "BATCH_SIZE": 32,
-        "LR": 1e-3,
-        "WARMUP_EPOCHS": 1,
+        "EPOCHS": 60,
+        "BATCH_SIZE": 64,
+        "LR": 5e-5,
+        "WARMUP_EPOCHS": 2,
         "VAL_SPLIT": 0.2,
-        "NUM_TRAIN_SAMPLES": 6726,  # 后续在create_tfrecords动态更新
-        "NUM_VAL_SAMPLES": 1682,
-        "UNFREEZE_EPOCH": 3,
-        "GRADIENT_CLIP": 5.0
+        "NUM_TRAIN_SAMPLES": 11812,
+        "NUM_VAL_SAMPLES": 2954,
+        "UNFREEZE_EPOCH": 5,
+        "GRADIENT_CLIP": 1.0
     }
 
     MODEL_PARAMS = {
-        "NUM_CLASSES": 5   # APTOS竞赛是5类
+        "NUM_CLASSES": 5,
+        "DROPOUT": 0.5,
+        "WEIGHT_DECAY": 1e-4
     }
 
-    # 其他路径
-    CHECKPOINT_PATH = os.path.join(BASE_DIR, "checkpoints", "best_model.h5")
+    CHECKPOINT_PATH = os.path.join(BASE_DIR, "checkpoints", "best_model")
     LOG_DIR = os.path.join(BASE_DIR, "logs")
 
 config = Config()

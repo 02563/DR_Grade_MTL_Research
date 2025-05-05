@@ -2,6 +2,7 @@
 
 import tensorflow as tf
 import os
+import json
 from .config import config
 
 
@@ -12,6 +13,8 @@ def _parse_example(example_proto):
     }
     parsed = tf.io.parse_single_example(example_proto, feature_description)
 
+    label = parsed['grade']  # 不 one-hot，用于计算权重
+
     # 正确地用 decode_jpeg！
     image = tf.io.decode_jpeg(parsed['image'], channels=3)
     image = tf.image.convert_image_dtype(image, tf.float32)  # [0,1] 浮点归一化
@@ -20,9 +23,17 @@ def _parse_example(example_proto):
     recon = tf.image.resize(image, [config.IMG_PARAMS["INPUT_SIZE"], config.IMG_PARAMS["INPUT_SIZE"]])
 
     # grade标签
-    grade = tf.one_hot(parsed['grade'], depth=config.MODEL_PARAMS["NUM_CLASSES"])
+    grade = tf.one_hot(label, depth=config.MODEL_PARAMS['NUM_CLASSES'])
 
-    return image, {"grade": grade, "recon": recon}
+    # 计算 sample weight（以 class_weight 映射）
+    with open(os.path.join(config.PROCESSED_DIR, 'class_weights.json'), 'r') as f:
+        class_weights = json.load(f)
+        # 注意：JSON读入后是字符串键，需转换回整数键
+        class_weights = {int(k): v for k, v in class_weights.items()}
+    #class_weights = config.TRAIN_PARAMS["CLASS_WEIGHT"]
+    weight = tf.cast(tf.gather(list(class_weights.values()), label), tf.float32)
+
+    return image, {"grade": grade, "recon": recon}, {"grade": weight}
 
 
 def get_dataset(split='train', batch_size=32):

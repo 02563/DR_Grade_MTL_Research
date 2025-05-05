@@ -1,36 +1,87 @@
-# src/model.py （使用 ResNet50 作为主干网络）
-
 import tensorflow as tf
-from tensorflow.keras import layers, models
-from .config import config
+from tensorflow.keras import layers, models, regularizers
+from tensorflow.keras.applications import ResNet50
 
-def build_model():
-    input_tensor = tf.keras.Input(shape=(224, 224, 3))
-    
-    # 正确嵌入 base_model，并命名
-    base_model = tf.keras.applications.ResNet50(
-        include_top=False,
-        weights='imagenet',
-        input_shape=(224, 224, 3),
-        pooling='avg'
-    )
-    base_model._name = 'resnet50'  # 显式命名
-    base_model.trainable = False
+class CBAM(tf.keras.layers.Layer):
+    def __init__(self, reduction_ratio=16, kernel_size=7, name=None):
+        super(CBAM, self).__init__(name=name)
+        self.reduction_ratio = reduction_ratio
+        self.kernel_size = kernel_size
 
-    x = base_model(input_tensor)  # ❗注意：使用 base_model(input_tensor)，不是 base_model.output
+    def build(self, input_shape):
+        channel = input_shape[-1]
+        self.shared_mlp = tf.keras.Sequential([
+            layers.Dense(channel // self.reduction_ratio, activation='relu', use_bias=True),
+            layers.Dense(channel, use_bias=True)
+        ])
+        self.conv_spatial = layers.Conv2D(filters=1, kernel_size=self.kernel_size,
+                                          strides=1, padding='same', activation='sigmoid')
 
-    # 分类输出
-    grade_output = layers.Dense(config.MODEL_PARAMS["NUM_CLASSES"], activation='softmax', name='grade')(x)
+    def call(self, inputs):
+        avg_pool = tf.reduce_mean(inputs, axis=[1, 2], keepdims=True)
+        max_pool = tf.reduce_max(inputs, axis=[1, 2], keepdims=True)
+        channel_attention = tf.nn.sigmoid(self.shared_mlp(avg_pool) + self.shared_mlp(max_pool))
+        x = inputs * channel_attention
 
-    # 重建输出
-    x_recon = layers.Dense(7 * 7 * 128, activation='relu')(x)
-    x_recon = layers.Reshape((7, 7, 128))(x_recon)
-    x_recon = layers.Conv2DTranspose(64, 3, strides=2, padding='same', activation='relu')(x_recon)
-    x_recon = layers.Conv2DTranspose(32, 3, strides=2, padding='same', activation='relu')(x_recon)
-    x_recon = layers.Conv2DTranspose(3, 3, strides=2, padding='same', activation='sigmoid')(x_recon)
+        avg_pool = tf.reduce_mean(x, axis=-1, keepdims=True)
+        max_pool = tf.reduce_max(x, axis=-1, keepdims=True)
+        concat = tf.concat([avg_pool, max_pool], axis=-1)
+        spatial_attention = self.conv_spatial(concat)
+        x = x * spatial_attention
+        return x
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "reduction_ratio": self.reduction_ratio,
+            "kernel_size": self.kernel_size,
+        })
+        return config
+
+def build_model(input_shape=(224, 224, 3), num_classes=5, dropout_rate=0.5, weight_decay=1e-4):
+    inputs = layers.Input(shape=input_shape)
+    base_model = ResNet50(include_top=False, weights='imagenet', input_tensor=inputs)
+
+    x = base_model.get_layer("conv3_block4_out").output
+    x = CBAM(name="cbam3")(x)
+
+    x = base_model.get_layer("conv4_block6_out").output
+    x = CBAM(name="cbam4")(x)
+
+    x = base_model.get_layer("conv5_block3_out").output
+    x = CBAM(name="cbam5")(x)
+
+    # Global average pooling
+    x_pool = layers.GlobalAveragePooling2D()(x)
+
+    # Classification head with MLP + Dropout + L2
+    x_class = layers.Dense(256, activation='relu',
+        kernel_regularizer=regularizers.l2(weight_decay))(x_pool)
+    x_class = layers.BatchNormalization()(x_class)
+    x_class = layers.Dropout(dropout_rate)(x_class)
+
+    x_class = layers.Dense(128, activation='relu',
+        kernel_regularizer=regularizers.l2(weight_decay))(x_class)
+    x_class = layers.BatchNormalization()(x_class)
+    x_class = layers.Dropout(dropout_rate)(x_class)
+
+    x_class = layers.Dense(64, activation='relu',
+        kernel_regularizer=regularizers.l2(weight_decay))(x_class)
+    x_class = layers.BatchNormalization()(x_class)
+    x_class = layers.Dropout(dropout_rate)(x_class)
+
+    grade_output = layers.Dense(num_classes, activation='softmax', name='grade')(x_class)
+
+    # Reconstruction head with L2 regularization
+    x_recon = layers.Conv2DTranspose(256, 3, strides=2, padding='same', activation='relu',
+        kernel_regularizer=regularizers.l2(weight_decay))(x)
+    x_recon = layers.Conv2DTranspose(128, 3, strides=2, padding='same', activation='relu',
+        kernel_regularizer=regularizers.l2(weight_decay))(x_recon)
+    x_recon = layers.Conv2DTranspose(64, 3, strides=2, padding='same', activation='relu',
+        kernel_regularizer=regularizers.l2(weight_decay))(x_recon)
+
+    x_recon = layers.Conv2D(3, 1, activation='sigmoid')(x_recon)
     recon_output = tf.image.resize(x_recon, [224, 224], name='recon')
 
-    # 模型定义
-    model = tf.keras.Model(inputs=input_tensor, outputs={"grade": grade_output, "recon": recon_output}, name="dr_mtl_model")
-
+    model = models.Model(inputs=inputs, outputs={"grade": grade_output, "recon": recon_output})
     return model
