@@ -12,7 +12,6 @@ from .model import build_model
 from .utils import get_dataset
 from .config import config
 
-# Enable mixed precision using new API
 mixed_precision.set_global_policy('mixed_float16')
 
 @register_keras_serializable()
@@ -51,14 +50,17 @@ class CustomUnfreezeCallback(tf.keras.callbacks.Callback):
 
     def on_epoch_begin(self, epoch, logs=None):
         if epoch == self.unfreeze_epoch:
-            print(f"[回调] 第{self.unfreeze_epoch}轮，解冻卷积与BN层并重新编译模型")
-
+            print(f"[回调] 第{self.unfreeze_epoch}轮，解冻 ResNet 后期 block 并重新编译模型")
             unfrozen = 0
             for layer in self.model.layers:
-                if isinstance(layer, tf.keras.layers.Conv2D) or isinstance(layer, tf.keras.layers.BatchNormalization):
+                if any(x in layer.name for x in ["conv4", "conv5"]):
                     layer.trainable = True
                     unfrozen += 1
-            print(f"[回调] 解冻 {unfrozen} 个 Conv2D/BN 层")
+            print(f"[回调] 解冻了 {unfrozen} 层（conv4/conv5）")
+
+            from tensorflow_addons.optimizers import AdamW
+            from tensorflow.keras.mixed_precision import LossScaleOptimizer
+            from src.config import config
 
             new_optimizer = AdamW(
                 learning_rate=self.model.optimizer.learning_rate,
@@ -74,6 +76,17 @@ class CustomUnfreezeCallback(tf.keras.callbacks.Callback):
                 metrics=self.metrics
             )
             self.model.make_train_function()
+
+def focal_loss(gamma=2., alpha=0.25):
+    def loss(y_true, y_pred):
+        y_true = tf.cast(y_true, tf.float32)
+        y_pred = tf.cast(y_pred, tf.float32)  # 强制转换解决 float16/32 不一致问题
+        epsilon = tf.keras.backend.epsilon()
+        y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)
+        cross_entropy = -y_true * tf.math.log(y_pred)
+        weight = alpha * tf.pow(1 - y_pred, gamma)
+        return tf.reduce_sum(weight * cross_entropy, axis=-1)
+    return loss
 
 def train():
     with open(os.path.join(config.PROCESSED_DIR, "class_weights.json"), "r") as f:
@@ -101,6 +114,7 @@ def train():
     train_dataset = get_dataset('train', config.TRAIN_PARAMS["BATCH_SIZE"])
     train_dataset = train_dataset.map(add_sample_weights, num_parallel_calls=tf.data.AUTOTUNE)
     val_dataset = get_dataset('val', config.TRAIN_PARAMS["BATCH_SIZE"])
+    val_dataset = val_dataset.map(add_sample_weights, num_parallel_calls=tf.data.AUTOTUNE)
 
     steps_per_epoch = config.TRAIN_PARAMS["NUM_TRAIN_SAMPLES"] // config.TRAIN_PARAMS["BATCH_SIZE"]
     validation_steps = config.TRAIN_PARAMS["NUM_VAL_SAMPLES"] // config.TRAIN_PARAMS["BATCH_SIZE"]
@@ -135,12 +149,12 @@ def train():
     )
 
     losses = {
-        "grade": CategoricalCrossentropy(label_smoothing=0.1),
+        "grade": focal_loss(gamma=2.0, alpha=0.25),
         "recon": "mse"
     }
     loss_weights = {
         "grade": 1.0,
-        "recon": 0.005
+        "recon": 0.001  # 降低重建权重
     }
     metrics = {
         "grade": [
@@ -167,8 +181,7 @@ def train():
             save_format='tf'
         ),
         callbacks.TensorBoard(
-            log_path = './tf_dir'
-            log_dir=log_path,
+            log_dir=config.LOG_DIR,
             update_freq='epoch'
         ),
         callbacks.EarlyStopping(

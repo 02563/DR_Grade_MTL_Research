@@ -38,23 +38,24 @@ class CBAM(tf.keras.layers.Layer):
         })
         return config
 
-def build_model(input_shape=(224, 224, 3), num_classes=5, dropout_rate=0.5, weight_decay=1e-4):
+def build_model(input_shape=(224, 224, 3), num_classes=5, dropout_rate=0.5, weight_decay=1e-4, use_cbam=True):
     inputs = layers.Input(shape=input_shape)
     base_model = ResNet50(include_top=False, weights='imagenet', input_tensor=inputs)
 
-    x = base_model.get_layer("conv3_block4_out").output
-    x = CBAM(name="cbam3")(x)
+    if use_cbam:
+        x = base_model.get_layer("conv3_block4_out").output
+        x = CBAM(name="cbam3")(x)
 
-    x = base_model.get_layer("conv4_block6_out").output
-    x = CBAM(name="cbam4")(x)
+        x = base_model.get_layer("conv4_block6_out").output
+        x = CBAM(name="cbam4")(x)
 
-    x = base_model.get_layer("conv5_block3_out").output
-    x = CBAM(name="cbam5")(x)
+        x = base_model.get_layer("conv5_block3_out").output
+        x = CBAM(name="cbam5")(x)
+    else:
+        x = base_model.get_layer("conv5_block3_out").output
 
-    # Global average pooling
     x_pool = layers.GlobalAveragePooling2D()(x)
 
-    # Classification head with MLP + Dropout + L2
     x_class = layers.Dense(256, activation='relu',
         kernel_regularizer=regularizers.l2(weight_decay))(x_pool)
     x_class = layers.BatchNormalization()(x_class)
@@ -72,7 +73,6 @@ def build_model(input_shape=(224, 224, 3), num_classes=5, dropout_rate=0.5, weig
 
     grade_output = layers.Dense(num_classes, activation='softmax', name='grade')(x_class)
 
-    # Reconstruction head with L2 regularization
     x_recon = layers.Conv2DTranspose(256, 3, strides=2, padding='same', activation='relu',
         kernel_regularizer=regularizers.l2(weight_decay))(x)
     x_recon = layers.Conv2DTranspose(128, 3, strides=2, padding='same', activation='relu',
