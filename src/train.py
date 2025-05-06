@@ -50,7 +50,9 @@ class CustomUnfreezeCallback(tf.keras.callbacks.Callback):
 
     def on_epoch_begin(self, epoch, logs=None):
         if epoch == self.unfreeze_epoch:
-            print(f"[回调] 第{self.unfreeze_epoch}轮，解冻 ResNet 后期 block 并重新编译模型")
+            print(f"[回调] 第{self.unfreeze_epoch}轮，解冻 ResNet 后期 block 并重新构建模型")
+
+            # 解冻层数记录
             unfrozen = 0
             for layer in self.model.layers:
                 if any(x in layer.name for x in ["conv4", "conv5"]):
@@ -58,9 +60,15 @@ class CustomUnfreezeCallback(tf.keras.callbacks.Callback):
                     unfrozen += 1
             print(f"[回调] 解冻了 {unfrozen} 层（conv4/conv5）")
 
-            from tensorflow_addons.optimizers import AdamW
-            from tensorflow.keras.mixed_precision import LossScaleOptimizer
             from src.config import config
+
+            new_model = build_model(
+                input_shape=(224, 224, 3),
+                num_classes=config.MODEL_PARAMS["NUM_CLASSES"],
+                dropout_rate=config.MODEL_PARAMS["DROPOUT"],
+                weight_decay=config.MODEL_PARAMS["WEIGHT_DECAY"]
+            )
+            new_model.set_weights(self.model.get_weights())
 
             new_optimizer = AdamW(
                 learning_rate=self.model.optimizer.learning_rate,
@@ -69,18 +77,20 @@ class CustomUnfreezeCallback(tf.keras.callbacks.Callback):
             )
             new_optimizer = LossScaleOptimizer(new_optimizer)
 
-            self.model.compile(
+            new_model.compile(
                 optimizer=new_optimizer,
                 loss=self.loss,
                 loss_weights=self.loss_weights,
                 metrics=self.metrics
             )
+
+            self.model = new_model
             self.model.make_train_function()
 
 def focal_loss(gamma=2., alpha=0.25):
     def loss(y_true, y_pred):
         y_true = tf.cast(y_true, tf.float32)
-        y_pred = tf.cast(y_pred, tf.float32)  # 强制转换解决 float16/32 不一致问题
+        y_pred = tf.cast(y_pred, tf.float32)
         epsilon = tf.keras.backend.epsilon()
         y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)
         cross_entropy = -y_true * tf.math.log(y_pred)
@@ -154,13 +164,14 @@ def train():
     }
     loss_weights = {
         "grade": 1.0,
-        "recon": 0.001  # 降低重建权重
+        "recon": 0.001
     }
+    shared_metrics = [
+        tf.keras.metrics.AUC(name='auc'),
+        tf.keras.metrics.CategoricalAccuracy(name='acc')
+    ]
     metrics = {
-        "grade": [
-            tf.keras.metrics.AUC(name='grade_auc'),
-            tf.keras.metrics.CategoricalAccuracy(name='grade_acc')
-        ],
+        "grade": shared_metrics,
         "recon": []
     }
 
@@ -174,7 +185,7 @@ def train():
     callbacks_list = [
         callbacks.ModelCheckpoint(
             filepath=config.CHECKPOINT_PATH,
-            monitor='val_grade_grade_auc',
+            monitor='val_grade_auc',
             save_best_only=True,
             mode='max',
             verbose=1,
@@ -185,8 +196,8 @@ def train():
             update_freq='epoch'
         ),
         callbacks.EarlyStopping(
-            monitor='val_grade_grade_auc',
-            patience=10,
+            monitor='val_grade_auc',
+            patience=60,
             restore_best_weights=True,
             verbose=1
         ),
