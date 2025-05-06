@@ -1,7 +1,7 @@
 import argparse
 import os
 import tensorflow as tf
-
+import json
 from src.data_prepare import create_tfrecords
 from src.train import train
 from src.config import config
@@ -10,7 +10,11 @@ def main(args):
     if args.prepare:
         print("正在生成TFRecords数据集...")
         os.makedirs(config.PROCESSED_DIR, exist_ok=True)
-        create_tfrecords()
+        class_weights = create_tfrecords()
+        with open(os.path.join(config.PROCESSED_DIR, 'class_weights.json'), 'w') as f:
+            json.dump(class_weights, f)
+    else:
+        class_weights = None
 
     if args.train:
         print("正在启动模型训练...")
