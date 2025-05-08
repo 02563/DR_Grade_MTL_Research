@@ -38,24 +38,28 @@ class CBAM(tf.keras.layers.Layer):
         })
         return config
 
+def conv_block(x, filters, name):
+    x = layers.Conv2D(filters, 3, padding='same', activation='relu', name=name+'_conv1')(x)
+    x = layers.BatchNormalization(name=name+'_bn1')(x)
+    x = layers.Conv2D(filters, 3, padding='same', activation='relu', name=name+'_conv2')(x)
+    x = layers.BatchNormalization(name=name+'_bn2')(x)
+    return x
+
 def build_model(input_shape=(224, 224, 3), num_classes=5, dropout_rate=0.5, weight_decay=1e-4, use_cbam=True):
     inputs = layers.Input(shape=input_shape)
     base_model = ResNet50(include_top=False, weights='imagenet', input_tensor=inputs)
 
-    if use_cbam:
-        x = base_model.get_layer("conv3_block4_out").output
-        x = CBAM(name="cbam3")(x)
+    skip1 = base_model.get_layer("conv2_block3_out").output  # 56x56x256
+    skip2 = base_model.get_layer("conv3_block4_out").output  # 28x28x512
+    skip3 = base_model.get_layer("conv4_block6_out").output  # 14x14x1024
+    x = base_model.get_layer("conv5_block3_out").output       # 7x7x2048
 
-        x = base_model.get_layer("conv4_block6_out").output
+    if use_cbam:
+        skip2 = CBAM(name="cbam2")(skip2)
+        skip3 = CBAM(name="cbam3")(skip3)
         x = CBAM(name="cbam4")(x)
 
-        x = base_model.get_layer("conv5_block3_out").output
-        x = CBAM(name="cbam5")(x)
-    else:
-        x = base_model.get_layer("conv5_block3_out").output
-
     x_pool = layers.GlobalAveragePooling2D()(x)
-
     x_class = layers.Dense(256, activation='relu',
         kernel_regularizer=regularizers.l2(weight_decay))(x_pool)
     x_class = layers.BatchNormalization()(x_class)
@@ -73,15 +77,24 @@ def build_model(input_shape=(224, 224, 3), num_classes=5, dropout_rate=0.5, weig
 
     grade_output = layers.Dense(num_classes, activation='softmax', name='grade')(x_class)
 
-    x_recon = layers.Conv2DTranspose(256, 3, strides=2, padding='same', activation='relu',
-        kernel_regularizer=regularizers.l2(weight_decay))(x)
-    x_recon = layers.Conv2DTranspose(128, 3, strides=2, padding='same', activation='relu',
-        kernel_regularizer=regularizers.l2(weight_decay))(x_recon)
-    x_recon = layers.Conv2DTranspose(64, 3, strides=2, padding='same', activation='relu',
-        kernel_regularizer=regularizers.l2(weight_decay))(x_recon)
+    # UNet-style decoder with skip connections
+    x = layers.Conv2DTranspose(1024, 3, strides=2, padding='same', activation='relu')(x)
+    x = layers.Concatenate()([x, skip3])
+    x = conv_block(x, 512, name='up1')
 
-    x_recon = layers.Conv2D(3, 1, activation='sigmoid')(x_recon)
-    recon_output = tf.image.resize(x_recon, [224, 224], name='recon')
+    x = layers.Conv2DTranspose(512, 3, strides=2, padding='same', activation='relu')(x)
+    x = layers.Concatenate()([x, skip2])
+    x = conv_block(x, 256, name='up2')
+
+    x = layers.Conv2DTranspose(256, 3, strides=2, padding='same', activation='relu')(x)
+    x = layers.Concatenate()([x, skip1])
+    x = conv_block(x, 128, name='up3')
+
+    x = layers.Conv2DTranspose(64, 3, strides=2, padding='same', activation='relu')(x)
+    x = conv_block(x, 64, name='up4')
+
+    recon_output = layers.Conv2D(3, 1, activation='sigmoid', name='recon')(x)
+    recon_output = tf.image.resize(recon_output, [224, 224])
 
     model = models.Model(inputs=inputs, outputs={"grade": grade_output, "recon": recon_output})
     return model
